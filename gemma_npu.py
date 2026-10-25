@@ -16,7 +16,7 @@ Prefill runs on the NPU in row chunks (CHUNKS); decode (one row) stays on the
 CPU in bf16, where a GEMV is bandwidth-bound and the CPU has twice the NPU's
 DRAM bandwidth.
 
-usage: python gemma_npu.py [--backend npu|cpu] [--prompt-tokens 236 890 1912 3696] [--decode 64]
+usage: python gemma_npu.py [--backend npu|cpu-int8|cpu] [--prompt-tokens 190 840 1860 3640] [--decode 64]
 """
 import argparse
 import json
@@ -202,7 +202,8 @@ N_SLOTS = 4096 // SLOT_ROWS
 COMPILE = os.environ.get("GEMMA_NPU_COMPILE", "1") == "1"
 
 
-def to_npu(model):
+def to_npu(model, all_cpu=False):
+    """Swap the text decoder's linears for W8A8 GEMMs; all_cpu runs every one as torch._int_mm."""
     lm = model.model.language_model
     groups = []
     per_layer = []
@@ -223,7 +224,7 @@ def to_npu(model):
     for parent, names, linears in groups:
         # The PLE gate (N=256) and projection (K=256) are 0.8 MOP/token each:
         # less than a launch costs.
-        small = names[0] in ("per_layer_input_gate", "per_layer_projection")
+        small = all_cpu or names[0] in ("per_layer_input_gate", "per_layer_projection")
         g = NPUGemm(linears, on_cpu=small)
         g.name = "+".join(names)
         gemms.append(g)
@@ -231,7 +232,8 @@ def to_npu(model):
             setattr(parent, name, Slice(g, i, l.in_features, l.out_features))
     layer_gemms = [dict(zip(keys, gemms[6 * i: 6 * i + 6])) for i, keys in enumerate(per_layer)]
     model.layer_gemms = layer_gemms
-    NPUGemm.allocate(max(g.K for g in gemms), max(g.n_pad for g in gemms))
+    if not all_cpu:
+        NPUGemm.allocate(max(g.K for g in gemms), max(g.n_pad for g in gemms))
     # Tied to the input embedding, so this is a new int8 copy, not a swap.
     model.lm_head = Int8Head(model.lm_head)
     return gemms
@@ -247,7 +249,7 @@ def load(backend):
             setattr(model.model, name, None)
     # Only the text decoder: the audio tower would refuse a non-sdpa implementation.
     model.model.language_model.set_attn_implementation("local_sdpa")
-    gemms = to_npu(model) if backend == "npu" else []
+    gemms = to_npu(model, all_cpu=backend == "cpu-int8") if backend in ("npu", "cpu-int8") else []
     if COMPILE:
         # Fuse the CPU-side elementwise work (norms, RoPE, GELU, residuals,
         # PLE) between the NPU calls, which are graph breaks.
@@ -298,7 +300,7 @@ def run(model, ids, n_decode, prefill=None):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", default="npu", choices=["npu", "cpu"])
+    ap.add_argument("--backend", default="npu", choices=["npu", "cpu-int8", "cpu"])
     ap.add_argument("--prompt-tokens", type=int, nargs="+", default=[190, 840, 1860, 3640])
     ap.add_argument("--decode", type=int, default=32)
     ap.add_argument("--threads", type=int, default=16)
@@ -323,6 +325,7 @@ def main():
         BY_SHAPE.clear()
         if prefill is not None:
             pipeline.STATS["wait"] = 0.0
+            pipeline.STATS["cpu_gemm"] = 0.0
         ttft, dec, toks, logits = run(model, ids, args.decode, prefill)
         P = ids.shape[1]
         line = (f"[{args.backend}] prompt {P} tok: TTFT {ttft * 1e3:.0f} ms = {P / ttft:.0f} tok/s prefill; "
@@ -330,7 +333,8 @@ def main():
         if gemms:
             line += f" | prefill: NPU busy {TIMES['npu'] * 1e3:.0f} ms over {TIMES['launches']} launches"
             if prefill is not None:
-                line += f", CPU waited on NPU {pipeline.STATS['wait'] * 1e3:.0f} ms"
+                line += (f", CPU waited on NPU {pipeline.STATS['wait'] * 1e3:.0f} ms"
+                         f", CPU int8 GEMMs {pipeline.STATS['cpu_gemm'] * 1e3:.0f} ms")
         print(line, flush=True)
         print("   ", json.dumps(tok.decode(toks[:24]))[:160], flush=True)
         if args.shapes:

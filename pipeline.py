@@ -233,7 +233,10 @@ class Prefill:
     def gemm(self, g, xq, sx, slot):
         """Yieldable GEMM request: int8 rows are staged now, the result comes back on resume."""
         if g.on_cpu:
-            return ("cpu", torch._int_mm(xq, g.w_kn), g.name)
+            t = time.perf_counter()
+            acc = torch._int_mm(xq, g.w_kn)
+            STATS["cpu_gemm"] = STATS.get("cpu_gemm", 0.0) + time.perf_counter() - t
+            return ("cpu", acc, g.name)
         T = xq.shape[0]
         g.stage(slot, T).copy_(xq)
         return ("npu", lambda: g.launch_slot(T, slot), g.name)

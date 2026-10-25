@@ -45,3 +45,19 @@ earliest-first leaves a serial tail.
 FLM's `gemma4e-flash:e2b` is 332 ms at 207 tokens but stops at ~1k tokens of
 context. Perplexity, W8A8 NPU vs HF bf16: +2.3% (notes), -4.8% (wikitext-2),
 i.e. within window-to-window noise.
+
+## Against the CPU alone (same pipeline, GEMMs as `torch._int_mm`: `--backend cpu-int8`)
+
+| prompt | NPU TTFT | CPU-int8 TTFT | HF bf16 CPU TTFT |
+|---|---|---|---|
+| 207 | 368 ms | **191 ms** | 203 ms |
+| 858 | 680 ms | 701 ms | 2732 ms |
+| 1878 | **1379 ms** | 1743 ms | 4028 ms |
+| 3658 | **2739 ms** | 3806 ms | 5632 ms |
+
+Decode is the same code on both (CPU), 28-30 tok/s; HF bf16 decodes at 13.5.
+At 3658 tokens the GEMMs take 1.49 s as `_int_mm` on the CPU and keep the NPU
+busy 2.38 s: the NPU is not the faster GEMM engine here, it is a second one
+that works while the CPU does attention. Under ~1k tokens the 512-row padding
+and 141+ launches make it slower than the CPU.
+
