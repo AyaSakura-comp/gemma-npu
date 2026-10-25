@@ -1,0 +1,10 @@
+__pycache__/
+*.npz
+*.jsonl
+*.log
+*.mlir
+filler.txt
+wikitext2_test.txt
+kbench/
+air_project/
+params.txt
