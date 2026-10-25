@@ -61,3 +61,26 @@ busy 2.38 s: the NPU is not the faster GEMM engine here, it is a second one
 that works while the CPU does attention. Under ~1k tokens the 512-row padding
 and 141+ launches make it slower than the CPU.
 
+
+## Against vLLM's CPU backend (2026-10-25, `vllm_bench.py`)
+
+vLLM 0.32.0+cpu (release wheel, venv `~/src/vllm-cpu/venv`), its native
+`gemma4.py`, bf16, 15 bound cores, prefix caching off. The release's CPU
+fallback for the slot-mapping kernel no longer matched the kernel's arguments
+(every request died with "Boolean value of Tensor ... ambiguous"); patched in
+the venv: `vllm/utils/cpu_triton_utils.py` (original kept as `.orig`).
+Run with `LD_PRELOAD=<vllm/libs/libtcmalloc_minimal.so.4>:<venv/lib/libiomp5.so>
+VLLM_CPU_KVCACHE_SPACE=4`.
+
+| prompt | vLLM CPU bf16, TTFT | this (NPU), TTFT, run right after | vLLM decode | this, decode |
+|---|---|---|---|---|
+| 207 | **174 ms** | 361 ms | 18.3 tok/s | **29.1** |
+| 858 | **550 ms** | 715 ms | 18.4 | **27.8** |
+| 1878 | **1207 ms** | 1362 ms | 18.3 | **27.0** |
+| 3658 | **2608 ms** | 2841 ms | 18.1 | **27.3** |
+
+vLLM's CPU prefill (oneDNN bf16 GEMMs on AVX512-BF16 + its CPU paged
+attention) beats this pipeline at every length; this keeps the decode lead
+(int8 GEMV vs bf16). The NPU's GEMMs alone are busy 2.39 s at 3658 tokens,
+nearly all of vLLM's 2.61 s TTFT, so moving vLLM's linears to the NPU
+without overlapping them with CPU work cannot win.
