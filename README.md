@@ -3,13 +3,15 @@
 HF transformers' `google/gemma-4-E2B-it`, text decoder, with every linear of the
 prefill run as a W8A8 GEMM on the NPU through an ordinary Triton kernel
 (`npu_kernels.py`, launched as `kernel[grid](...)` via Triton-XDNA), and decode
-on the CPU. Needs the Triton-XDNA branch `feat/xrt-resident-tensors`
-(`triton.backends.amd_triton_npu.resident`).
+on the CPU. Needs Triton-XDNA with resident tensors
+(`triton.backends.amd_triton_npu.resident`): the `main` branch of
+[AyaSakura-comp/Triton-XDNA](https://github.com/AyaSakura-comp/Triton-XDNA).
 
 ```bash
 source ~/src/Triton-XDNA/npu-env.sh
 python gemma_npu.py --backend npu            # TTFT + decode at 4 prompt lengths
 python gemma_npu.py --backend cpu            # same model, HF bf16 on the CPU
+python serve.py --port 8078                  # OpenAI-compatible server, one request at a time
 ./run_flm_bench.sh gemma4-it:e2b             # FastFlowLM, the same prompts
 python eval_ppl.py npu ppl_npu.npz           # teacher-forced NLL (vs `cpu`)
 python trace_pipe.py 3640 t.jsonl && python3 plot_trace.py t.jsonl gantt.png
@@ -84,3 +86,8 @@ attention) beats this pipeline at every length; this keeps the decode lead
 (int8 GEMV vs bf16). The NPU's GEMMs alone are busy 2.39 s at 3658 tokens,
 nearly all of vLLM's 2.61 s TTFT, so moving vLLM's linears to the NPU
 without overlapping them with CPU work cannot win.
+
+[XDNA-vLLM](https://github.com/AyaSakura-comp/XDNA-vLLM) is the overlapped
+version inside vLLM: its `xdna_int8` method splits each prefill GEMM between
+the CPU and the NPU, and prefills one 3.6K-token prompt in 1626 ms against
+1883 ms with the NPU switched off (-14%).
