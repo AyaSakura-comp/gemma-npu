@@ -198,7 +198,9 @@ class Slice(torch.nn.Module):
 # which the device has ~32, 10 held by the FLM service on this box.
 CHUNK = SMALL_CHUNK = int(os.environ.get("GEMMA_NPU_ROWS", "512"))
 SLOT_ROWS = SMALL_CHUNK
-N_SLOTS = 4096 // SLOT_ROWS
+# One slot per micro-batch, so this caps the pipelined prompt length.
+MAX_PROMPT = int(os.environ.get("GEMMA_NPU_MAX_PROMPT", "4096"))
+N_SLOTS = -(-MAX_PROMPT // SLOT_ROWS)
 COMPILE = os.environ.get("GEMMA_NPU_COMPILE", "1") == "1"
 
 
